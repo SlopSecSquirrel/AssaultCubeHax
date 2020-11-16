@@ -4,6 +4,7 @@
 #include "vector.h"
 #include "ESP.h"
 #include "dllmain.h"
+#include "Entity.h"
 
 static struct openglFormatMatrix
 {
@@ -32,7 +33,7 @@ int numPlayerEntitiesAddressOffset = 0x10F500; // ac_client.exe+25719 - 89 0D 00
 // OpenGL specific offsets
 int viewMatrixOffset = 0x101Ae8;
 
-// Entity object variable offsets
+// Entity object variable offsets, kept for reference mostly as we have a ReClass entity to do the legwork
 
 int yawOffset = 0x40;
 int pitchOffset = 0x44;
@@ -92,14 +93,9 @@ int getEntAtCrosshair(int baseAddress) {
 	return getEntAtCrosshairf();
 }
 
-void selectWeapon(int playerPtr, HANDLE currentProcess, int weapon) {
+void selectWeapon(entity* playerPtr, int weapon) {
 	// Get the current list of weapon pointers
-	int weapons[10];
-	for (int i = 0; i < 10; i++) {
-		weapons[i] = readMemory<int>(currentProcess, (void*)(playerPtr + weaponsListOffset + (i * 4)));
-	}
-
-	writeMemory<int>(currentProcess, (void*)(playerPtr + currWeaponPtrOffset), weapons[weapon]);
+	playerPtr->currWeaponPtr = playerPtr->weaponPtrs[weapon];
 
 }
 
@@ -163,12 +159,13 @@ void printMenu() {
 	writeToGameConsole("Numpad 1 full ammo / Numpad 2 full health");
 	writeToGameConsole("Numpad 3 for the help menu / Numpad 4 silly verbs");
 	writeToGameConsole("Numpad 5 toggle aimbot / Numpad 6 toggle triggerbot");
+	writeToGameConsole("Numpad 7 toggle ESP / Numpad 8 cycle weapons");
 	writeToGameConsole("===================");
 }
 
 
 
-void aimbot(HANDLE currentProcess, int baseAddress, bool targetAll) {
+void aimbot(HANDLE currentProcess, int baseAddress, entity* player, bool targetAll) {
 	// first up, find out how many entity pointers we'll read.
 	int numEnts = readMemory<int>(currentProcess, (void*)(baseAddress + numPlayerEntitiesAddressOffset));
 	if (numEnts == 0) {
@@ -177,45 +174,26 @@ void aimbot(HANDLE currentProcess, int baseAddress, bool targetAll) {
 	// Get the entity list pointer so that we can dereference it later
 	int entityListPtr = readMemory<int>(currentProcess, (void*)(baseAddress + entityListAddressOffset));
 
-	// Get the user pointer so that we can dereference it later
-	int playerPtr = readMemory<int>(currentProcess, (void*)(baseAddress + playerBaseAddressOffset));
-	// Get the user's position
-	float playerX = readMemory<float>(currentProcess, (void*)(playerPtr + 4)); // First four bytes of any entity is a pointer to it's vftable
-	float playerY = readMemory<float>(currentProcess, (void*)(playerPtr + 8));
-	float playerZ = readMemory<float>(currentProcess, (void*)(playerPtr + 12));
-	float originalPlayerPitch = readMemory<float>(currentProcess, (void*)(playerPtr + pitchOffset));
-	float originalPlayerYaw = readMemory<float>(currentProcess, (void*)(playerPtr + pitchOffset));
-	int playerTeam = readMemory<int>(currentProcess, (void*)(playerPtr + teamOffset));
-
-	Vec3 playerVec = { playerX, playerY, playerZ };
+	
+	Vec3 playerVec = { player->xPosHead, player->yPosHead, player->zPosHead};
 	float closestDistance = 9999999.0f; // The distance to the closest enemy, initialised to some chonky number
 	Vec3 closestEnemyVec;
 	for (int i = 1; i < numEnts; i++) { // First pointer is always 0, because reasons, so skip it with i = 1
-		int entPtr = readMemory<int>(currentProcess, (void*)(entityListPtr + (i * 4)));
-		int enemyHealth = readMemory<int>(currentProcess, (void*)(entPtr + healthOffset));
-		if (enemyHealth <= 0) { // don't bother with calculations if they're dead.
+		entity* enemy = readMemory<entity*>(currentProcess, (void*)(entityListPtr + (i * 4)));
+		
+		if (enemy->health <= 0) { // don't bother with calculations if they're dead.
 			continue;
 		}
-		float enemyX = readMemory<float>(currentProcess, (void*)(entPtr + 4));
-		float enemyY = readMemory<float>(currentProcess, (void*)(entPtr + 8));
-		float enemyZ = readMemory<float>(currentProcess, (void*)(entPtr + 12));
-
-		// Get the enemy name
-		char enemyName[16] = { 0 };
-		ReadProcessMemory(currentProcess, (void*)(entPtr + nameOffset), enemyName, 16, NULL);
-		int enemyTeam = readMemory<int>(currentProcess, (void*)(entPtr + teamOffset));
-
-
-
+		
 		//Get the distance to the player.
-		float distance = sqrt(pow(playerX - enemyX, 2) + pow(playerY - enemyY, 2) + pow(playerZ - enemyZ, 2));
-		if (distance < closestDistance && enemyHealth > 0) {
-			if (!targetAll && enemyTeam == playerTeam) {
+		float distance = sqrt(pow(player->xPosHead - enemy->xPosHead, 2) + pow(player->yPosHead- enemy->yPosHead, 2) + pow(player->zPosHead- enemy->zPosHead, 2));
+		if (distance < closestDistance && enemy->health > 0) {
+			if (!targetAll && enemy->team == player->team) {
 				continue;
 			}
 			// This is a viable candidate, check if we can see the enemy
 			closestDistance = distance;
-			closestEnemyVec = { enemyX, enemyY, enemyZ };
+			closestEnemyVec = { enemy->xPosHead, enemy->yPosHead, enemy->zPosHead };
 
 		}
 		// debug output - 
@@ -233,50 +211,40 @@ void aimbot(HANDLE currentProcess, int baseAddress, bool targetAll) {
 	float yaw = -atan2(distanceVector.x, distanceVector.y) / 3.141592653589F * 180 + 180;
 	float pitch = atan2(distanceVector.z, sqrt(distanceVector.x * distanceVector.x + distanceVector.y * distanceVector.y)) / 3.141592653589F * 180;
 	// we should have the correct angles now, so put them in place of our existing pitch and yaw
-	writeMemory<float>(currentProcess, (void*)(playerPtr + pitchOffset), pitch);
-	writeMemory<float>(currentProcess, (void*)(playerPtr + yawOffset), yaw);
-
-
+	player->pitch = pitch;
+	player->yaw = yaw;
 }
 
-void triggerbot(HANDLE currentProcess, int baseAddress, bool targetAll) {
+void triggerbot(HANDLE currentProcess, int baseAddress, entity* player, bool targetAll) {
 	int entLookedAt = getEntAtCrosshair(baseAddress);
-	int playerPtr = readMemory<int>(currentProcess, (void*)(baseAddress + playerBaseAddressOffset));
+	
 	if (entLookedAt == 0x0) { // not looking at anything, nullptr
 		// Stop shooting
-		writeMemory<int>(currentProcess, (void*)(playerPtr + shootingBooleanOffset), 0);
+		player->isShooting = 0;
 		return;
 	}
 
+	entity enemy = readMemory<entity>(currentProcess, (void*)(entLookedAt));
 
-	std::cout << "Looking at a player entity at 0x" << std::hex << entLookedAt << std::dec << std::endl;
-	int playerTeam = readMemory<int>(currentProcess, (void*)(playerPtr + teamOffset));
-
-	int enemyHealth = readMemory<int>(currentProcess, (void*)(entLookedAt + healthOffset));
-	if (enemyHealth <= 0) { // don't bother with calculations if they're dead.
+	if (enemy.health <= 0) { // don't bother with calculations if they're dead.
 		return;
 	}
-
-	// Get the enemy name
-	char enemyName[16] = { 0 };
-	ReadProcessMemory(currentProcess, (void*)(entLookedAt + nameOffset), enemyName, 16, NULL);
-	int enemyTeam = readMemory<int>(currentProcess, (void*)(entLookedAt + teamOffset));
 
 	// Debug COUTs
 	std::cout << "Looking at a player entity at 0x" << std::hex << entLookedAt << std::dec;
-	std::cout << " name - " << enemyName << " team - " << enemyTeam << std::endl;
+	std::cout << " name - " << enemy.name << " team - " << enemy.team << std::endl;
 
 	// Bail out if we're looking at a teammate
-	if (playerTeam == enemyTeam && !targetAll) {
+	if (player->team == enemy.team && !targetAll) {
 		return;
 	}
 
 	std::cout << "It's an enemy, start shooting" << std::endl;
-	writeMemory<int>(currentProcess, (void*)(playerPtr + shootingBooleanOffset), 1);
+	player->isShooting = 1;
 
 }
 
-void renderESP(HANDLE currentProcess, int baseAddress, ESP friendESP, ESP foeESP) {
+void renderESP(HANDLE currentProcess, entity* player, int baseAddress, ESP friendESP, ESP foeESP) {
 	// Must be recalculated every frame
 	openglFormatMatrix dumbMatrix = readMemory<openglFormatMatrix>(currentProcess, (void*)(baseAddress + viewMatrixOffset));
 
@@ -291,39 +259,23 @@ void renderESP(HANDLE currentProcess, int baseAddress, ESP friendESP, ESP foeESP
 	// Get the entity list pointer so that we can dereference it later
 	int entityListPtr = readMemory<int>(currentProcess, (void*)(baseAddress + entityListAddressOffset));
 
-	// Get the user pointer so that we can dereference it later
-	int playerPtr = readMemory<int>(currentProcess, (void*)(baseAddress + playerBaseAddressOffset));
 
-	// Get the user's position
-	float playerX = readMemory<float>(currentProcess, (void*)(playerPtr + 4)); 
-	float playerY = readMemory<float>(currentProcess, (void*)(playerPtr + 8));
-	float playerZ = readMemory<float>(currentProcess, (void*)(playerPtr + 12));
-	
-	// Get the player's team, for toggling the friendly boxes on or off
-	int playerTeam = readMemory<int>(currentProcess, (void*)(playerPtr + teamOffset));
-
-	
 	for (int i = 1; i < numEnts; i++) { // First pointer is always 0, because reasons, so skip it with i = 1
-		int entPtr = readMemory<int>(currentProcess, (void*)(entityListPtr + (i * 4)));
-		int enemyHealth = readMemory<int>(currentProcess, (void*)(entPtr + healthOffset));
-		if (enemyHealth <= 0) { // don't bother with rendering ESP if they're dead.
+		entity* enemy = readMemory<entity*>(currentProcess, (void*)(entityListPtr + (i * 4)));
+
+		if (enemy->health <= 0) { // don't bother with rendering ESP if they're dead.
 			continue;
 		}
-		 
-		int enemyTeam = readMemory<int>(currentProcess, (void*)(entPtr + teamOffset));
 
-		float enemyX = readMemory<float>(currentProcess, (void*)(entPtr + 4));
-		float enemyY = readMemory<float>(currentProcess, (void*)(entPtr + 8));
-		float enemyZ = readMemory<float>(currentProcess, (void*)(entPtr + 12));
-		glm::vec3 enemyVec = { enemyX, enemyY, enemyZ };
-		float distance = sqrt(pow(playerX - enemyX, 2) + pow(playerY - enemyY, 2) + pow(playerZ - enemyZ, 2));
-		if (enemyTeam == playerTeam) {
-			friendESP.renderESPBox(enemyVec, dumbMatrix.v,distance);
+		glm::vec3 enemyVec = { enemy->xPosHead, enemy->yPosHead, enemy->zPosHead };
+		float distance = sqrt(pow(player->xPosHead - enemyVec.x, 2) + pow(player->yPosHead - enemyVec.y, 2) + pow(player->zPosHead - enemyVec.z, 2));
+		if (enemy->team == player->team) {
+			friendESP.renderESPBox(enemyVec, dumbMatrix.v, distance);
 		}
 		else {
-			foeESP.renderESPBox(enemyVec, dumbMatrix.v,distance);
+			foeESP.renderESPBox(enemyVec, dumbMatrix.v, distance);
 		}
-		
+
 	}
 }
 
@@ -345,7 +297,7 @@ DWORD WINAPI haxThread(HMODULE hmodule) {
 
 	while (1)
 	{
-		int playerEnt = readMemory<int>(currentProcess, (void*)(baseAddress + playerBaseAddressOffset));
+		entity* playerEnt = readMemory<entity*>(currentProcess, (void*)(baseAddress + playerBaseAddressOffset));
 		if (GetAsyncKeyState(VK_NUMPAD0) & 1) {
 			std::cout << "Detaching injected DLL." << std::endl;
 			break;
@@ -358,20 +310,18 @@ DWORD WINAPI haxThread(HMODULE hmodule) {
 			ammoPointer = readMemory<int>(currentProcess, (void*)(ammoPointer + 0x374));
 			ammoPointer = readMemory<int>(currentProcess, (void*)(ammoPointer + 0x14));
 			writeMemory<int>(currentProcess, (void*)ammoPointer, 9999);*/
-			writeMemory<int>(currentProcess, (void*)(playerEnt + grenadeOffset), 9999);
+			//writeMemory<int>(currentProcess, (void*)(playerEnt + grenadeOffset), 9999);
 			for (int i = 0; i < 10; i++) {
-				writeMemory<int>(currentProcess, (void*)(playerEnt + playerAmmoListOffset + (i * 4)), 9999);
+				playerEnt->ammo[i] = 9999;
 			}
 		}
 
 		if (GetAsyncKeyState(VK_NUMPAD2) & 1) { // full health
 			// give self 999 health 
 			// get the player entity
-			int playerEnt = readMemory<int>(currentProcess, (void*)(baseAddress + playerBaseAddressOffset));
-			writeMemory<int>(currentProcess, (void*)(playerEnt + healthOffset), 9999);
-			writeMemory<int>(currentProcess, (void*)(playerEnt + armourOffset), 9999);
-			writeMemory<bool>(currentProcess, (void*)(playerEnt + akimboOffset), 1);
-
+			playerEnt->health = 9999;
+			playerEnt->armour = 9999;
+			playerEnt->akimbo = 1;
 		}
 
 		if (GetAsyncKeyState(VK_NUMPAD3) & 1) { // print the cheat menu
@@ -436,25 +386,26 @@ DWORD WINAPI haxThread(HMODULE hmodule) {
 
 		if (GetAsyncKeyState(VK_NUMPAD8) & 1) { // cycle weapons
 			++currWeapon;
-			if (currWeapon > 9) {
+			if (currWeapon > 8) {
 				currWeapon = 0;
 			}
-			selectWeapon(playerEnt, currentProcess, currWeapon);
+
+			selectWeapon(playerEnt, currWeapon);
 		}
 
 		if (aimbotMode > 0)
 		{
-			aimbot(currentProcess, baseAddress, aimbotMode == 1);
+			aimbot(currentProcess, baseAddress, playerEnt, aimbotMode == 1);
 		}
 
 		if (triggerbotMode > 0)
 		{
-			triggerbot(currentProcess, baseAddress, triggerbotMode == 1);
+			triggerbot(currentProcess, baseAddress, playerEnt, triggerbotMode == 1);
 		}
 
 
 		if (espMode > 0) {
-			renderESP(currentProcess, baseAddress, friendESP, foeESP);
+			renderESP(currentProcess, playerEnt, baseAddress, friendESP, foeESP);
 		}
 	}
 	FreeConsole();
